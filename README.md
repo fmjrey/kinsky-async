@@ -36,6 +36,8 @@ battled tested in a production environment.
 ### 0.1.0
 
 Continuing from [kinsky 0.1.24](https://github.com/pyr/kinsky)
+- Producer: return [in out] vector, takes :duplex? config option
+  and records with an optional :response channel
 - Minor typo and code refactoring
 
 ## Examples
