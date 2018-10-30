@@ -5,7 +5,8 @@
             [clojure.core.async.impl.protocols :as impl]
             [kinsky.client      :as client])
   (:import [java.lang IllegalStateException]
-           [java.util ConcurrentModificationException]))
+           [java.util ConcurrentModificationException]
+           [org.apache.kafka.common.errors WakeupException]))
 
 (defn duplex
   ([up down] (duplex up down [up down]))
@@ -54,6 +55,13 @@
   "Test if a value is a subclass of Exception"
   [e]
   (instance? Exception e))
+
+(defn ex-response
+  "Return a response containing the given exception."
+  [e]
+  {:type :exception :exception e})
+
+(def eof-response {:type :eof})
 
 (defn make-consumer
   "Build a consumer, with or without deserializers"
@@ -128,7 +136,7 @@
 
 (defn close-poller
   [ctl out driver]
-  (a/put! out {:type :eof})
+  (a/put! out eof-response)
   (a/close! ctl)
   (client/close! driver)
   (a/close! out))
@@ -139,7 +147,7 @@
     (let [records (client/poll! driver timeout)]
       (a/>!! recs records)
       true)
-    (catch org.apache.kafka.common.errors.WakeupException _
+    (catch WakeupException _
       (poller-ctl ctl out driver timeout))
     (catch IllegalStateException _
       (poller-ctl ctl out driver timeout))
@@ -147,7 +155,7 @@
       ;; Cannot happen unless there is a bug, so don't hide it
       (throw e))
     (catch Exception e
-      (a/put! out {:type :exception :exception e})
+      (a/put! out (ex-response e))
       false)))
 
 (defn poller-thread
