@@ -168,13 +168,13 @@
     (a/tap mult c1)
     (a/tap mult c2)
     (a/pipe recs out)
-    (future
+    (a/thread
       (.setName (Thread/currentThread) "kafka-control-poller")
       (loop []
         (when-let [cr (a/<!! c2)]
           (client/wake-up! driver)
           (recur))))
-    (future
+    (a/thread
       (.setName (Thread/currentThread) "kafka-consumer-poller")
       (try
         (loop []
@@ -296,7 +296,7 @@
          opts    (dissoc config :input-buffer :output-buffer)
          driver  (make-producer opts ks vs)
          in      (a/chan inbuf)]
-     (future
+     (a/thread
        (loop [{:keys [op timeout callback response topic] :as record} (a/<!! in)]
          (case op
            :close
