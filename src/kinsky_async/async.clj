@@ -178,11 +178,14 @@
           (recur))))
     (future
       (.setName (Thread/currentThread) "kafka-consumer-poller")
-      (loop []
-        (let [recur? (safe-poll c1 recs out driver timeout)]
-          (if recur?
-            (recur)
-            (close-poller ctl out driver)))))
+      (try
+        (loop []
+          (when (safe-poll c1 recs out driver timeout)
+            (recur)))
+        (catch Exception e
+          (a/put! out (ex-response e)))
+        (finally
+          (close-poller ctl out driver))))
     [ctl out]))
 
 (defn consumer
