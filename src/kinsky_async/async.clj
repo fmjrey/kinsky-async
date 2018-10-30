@@ -95,37 +95,35 @@
     (let [{:keys [op]}  payload
           topic-offsets (:topic-offsets payload)
           topic         (or (:topics payload) (:topic payload))]
-      (cond
-        (= op :callback)
+      (case op
+        :callback
         (let [f (:callback payload)]
           (or (f driver out)
               (not (:process-result? payload))))
 
-        (= op :stop)
+        :stop
         false
 
-        :else
         (or
-         (cond
-           (= op :subscribe)
+         (case op
+           :subscribe
            (client/subscribe! driver topic (channel-listener out))
 
-           (= op :unsubscribe)
+           :unsubscribe
            (client/unsubscribe! driver)
 
-           (and (= op :commit) topic-offsets)
-           (client/commit! driver topic-offsets)
+           :commit
+           (if topic-offsets
+             (client/commit! driver topic-offsets)
+             (client/commit! driver))
 
-           (= op :commit)
-           (client/commit! driver)
-
-           (= op :pause)
+           :pause
            (client/pause! driver (:topic-partitions payload))
 
-           (= op :resume)
+           :resume
            (client/resume! driver (:topic-partitions payload))
 
-           (= op :partitions-for)
+           :partitions-for
            (do
              (let [parts (client/partitions-for driver topic)]
                (a/put! (or (:response payload) out)
@@ -300,23 +298,22 @@
          in      (a/chan inbuf)]
      (future
        (loop [{:keys [op timeout callback response topic] :as record} (a/<!! in)]
-         (cond
-           (= op :close)
+         (case op
+           :close
            (client/close! driver timeout)
 
-           (= op :flush)
+           :flush
            (client/flush! driver)
 
-           (= op :callback)
+           :callback
            (callback driver)
 
-           (= op :partitions-for)
+           :partitions-for
            (when response
              (a/put! response
                      {:type       :partitions
                       :partitions (client/partitions-for driver (name topic))}))
 
-           :else
            (client/send! driver (dissoc record :op)))
          (recur (a/<!! in))))
      in)))
