@@ -92,9 +92,7 @@
 (defn poller-ctl
   [ctl out driver timeout]
   (if-let [payload (get-within ctl timeout)]
-    (let [{:keys [op]}  payload
-          topic-offsets (:topic-offsets payload)
-          topic         (or (:topics payload) (:topic payload))]
+    (let [op (:op payload)]
       (case op
         :callback
         (let [f (:callback payload)]
@@ -107,13 +105,23 @@
         (or
          (case op
            :subscribe
-           (client/subscribe! driver topic (channel-listener out))
+           (client/subscribe! driver
+                              (or (:topics payload) (:topic payload))
+                              (channel-listener out))
 
            :unsubscribe
            (client/unsubscribe! driver)
 
+           :seek
+           (let [{:keys [offset topic-partition topic-partitions]} payload]
+             (if (number? offset)
+               (client/seek! driver topic-partition offset)
+               (case offset
+                 :beginning (client/seek-beginning! driver topic-partitions)
+                 :end (client/seek-end! driver topic-partitions))))
+
            :commit
-           (if topic-offsets
+           (if-let [topic-offsets (:topic-offsets payload)]
              (client/commit! driver topic-offsets)
              (client/commit! driver))
 
@@ -125,7 +133,7 @@
 
            :partitions-for
            (do
-             (let [parts (client/partitions-for driver topic)]
+             (let [parts (client/partitions-for driver (:topic payload))]
                (a/put! (or (:response payload) out)
                        {:type       :partitions
                         :partitions parts}))))
@@ -206,6 +214,17 @@
 
    - `:subscribe`: `{:op :subscribe :topic \"foo\"}` subscribe to a topic.
    - `:unsubscribe`: `{:op :unsubscribe}`, unsubscribe from all topics.
+   - `:seek`: `{:op :seek :offset 1234 :topic-partition {:topic \"foo\"
+                                                         :partition 0}}`, or
+      `{:op :seek :offset :beginning :topic-partitions [{:topic \"foo\"
+                                                         :partition 0}]}`, or
+      `{:op :seek :offset :end :topic-partitions [{:topic \"foo\"
+                                                   :partition 0}
+                                                  {:topic \"bar\"
+                                                   :partition 0}]}`.
+      Overrides the fetch offsets the consumer will use on the next poll.
+      The offset must be a long value to seek on a single topic-partition,
+      or keyword `:beginning` or `:end` to seek on a seq of topic-partitions.
    - `:partitions-for`: `{:op :partitions-for :topic \"foo\"}`, yield partition
       info for the given topic. If a `:response` key is
       present, produce the response there instead of on
