@@ -39,6 +39,7 @@ Continuing from [kinsky 0.1.24](https://github.com/pyr/kinsky)
 - Producer: return [in out] vector, takes :duplex? config option
   and records with an optional :response channel
 - Consumer: added :seek op
+- Consumer+Producer: handle a closed control channel as a :close operation
 - Minor typo and code refactoring
 
 ## Examples

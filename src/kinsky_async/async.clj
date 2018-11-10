@@ -87,7 +87,7 @@
   (let [max-wait (a/timeout tm)]
     (a/alt!!
       max-wait ([_] nil)
-      ctl      ([v] v))))
+      ctl      ([v] (or v {:op :close})))))
 
 (defn poller-ctl
   [ctl out driver timeout]
@@ -99,7 +99,7 @@
           (or (f driver out)
               (not (:process-result? payload))))
 
-        :stop
+        [:close :stop]
         false
 
         (or
@@ -236,7 +236,8 @@
    - `:callback`: `{:op :callback :callback (fn [d ch])}` Execute a function
       of 2 arguments, the consumer driver and output channel, on a woken up
       driver.
-   - `:stop`: `{:op :stop}` stop and close consumer.
+   - `:close`: `{:op :close}` stop and close consumer.
+   - `:stop`: `{:op :stop}` same as :close.
 
 
    The resulting output channel will emit payloads with as maps containing a
@@ -248,6 +249,8 @@
    - `:eof`: The end of this stream.
    - `:partitions`: The result of a `:partitions-for` operation.
    - `:woken-up`: A notification that the consumer was woken up.
+
+   A closed control channel has the same effect as a :close operation.
 "
   ([config]
    (consumer config nil nil))
@@ -325,6 +328,8 @@
    - `:exception`: An exception raised
    - `:partitions`: The result of a `:partitions-for` operation.
    - `:eof`: The producer is closed.
+
+   A closed input channel has the same effect as a :close operation.
 "
   ([config]
    (producer config nil nil))
@@ -376,38 +381,37 @@
        (try
          (loop [{:keys [op timeout callback response topic records]
                  :as   record} (a/<!! in)]
-           (try
-             (case op
-               :close
-               (client/close! driver timeout)
+           (if (or (nil? record) (= op :close))
+             (client/close! driver timeout)
+             (do
+               (try
+                 (case op
+                   :flush
+                   (client/flush! driver)
 
-               :flush
-               (client/flush! driver)
+                   :callback
+                   (callback driver)
 
-               :callback
-               (callback driver)
+                   :partitions-for
+                   (when response
+                     (a/put! response
+                             {:type       :partitions
+                              :partitions (client/partitions-for driver
+                                                                 (name topic))}))
 
-               :partitions-for
-               (when response
-                 (a/put! response
-                         {:type       :partitions
-                          :partitions (client/partitions-for driver
-                                                             (name topic))}))
+                   :records
+                   (let [n (count records)
+                         cb (cb-for n response)]
+                     (doseq [record records]
+                       (send! record cb)))
 
-               :records
-               (let [n (count records)
-                       cb (cb-for n response)]
-                 (doseq [record records]
-                   (send! record cb)))
+                   (nil :record)
+                   (send! record (cb-for 1 response)))
 
-               (nil :record)
-               (send! record (cb-for 1 response)))
+                 (catch Exception e
+                   ((afn-for op response) (or response out) (->resp e))))
 
-             (catch Exception e
-               ((afn-for op response) (or response out) (->resp e))))
-
-           (when (not= op :close)
-             (recur (a/<!! in))))
+               (recur (a/<!! in)))))
          (catch Exception e
            (a/put! out (->resp e)))
          (finally
