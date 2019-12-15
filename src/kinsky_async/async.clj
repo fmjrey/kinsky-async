@@ -134,7 +134,7 @@
            :partitions-for
            (do
              (let [parts (client/partitions-for driver (:topic payload))]
-               (a/put! (or (:response payload) out)
+               (a/put! (or (:response-ch payload) out)
                        {:type       :partitions
                         :partitions parts}))))
          true)))
@@ -278,7 +278,7 @@
 (defn producer
   "Build a producer, reading records to send from a channel.
 
-   Arguments config ks and vs work as for kinsky.client/producer.
+   Arguments mirror those of kinsky.client/producer.
    The config map must be a valid consumer configuration map and may contain
    the following additional keys:
 
@@ -286,28 +286,25 @@
    - `:output-buffer`: Maximum queued consumed messages.
    - `:duplex?`: yields a duplex channel instead of a vector of two chans
 
-   Yields a vector of two values `[in out]`, an input channel and
-   an output channel.
+   Yields a vector of two values `[in out]`, an input channel where operations
+   to be performed should be sent, and an output channel where operation
+   results are sent.
 
-   The resulting input channel is used to interact with the producer driver
+   The input channel is used to send operations to the producer driver
    and expects map payloads, whose operation is determined by their
-   `:op` key. The following commands are handled:
+   `:op` key.
+   An optional response channel can be provided under the `:response-ch` key,
+   in which case the operation results are sent to that channel instead of the
+   out/duplex channel. Result are sent to the response channel in a blocking
+   manner, while results sent to the out/duplex channel are sent in a
+   non-blocking manner. Therefore make sure the response channel is consumed.
+   The response channel is closed after the operation completes while the
+   out/duplex channel remains open until a `:close` operation.
+
+   The following operations are handled:
 
    - `:record`: `{:op :record :topic \"foo\"}` send a record out, also
-      performed when no `:op` key is present. An optional `:response` entry
-      should contain a channel which will convey the send result as a map
-      containing a `:type` key where `:type` may be:, either:
-      - `:exception`: the exception in entry `:exception` was raised
-      - `:record-metadata`: a producer record map in the form:
-        {:type      :record-metadata
-         :topic     \"topic-name\"
-         :partition 0 ;; nil if unknown
-         :offset    1234567890
-         :timestamp 9876543210}
-      When a response channel is provided, results are not sent to the
-      out/duplex channel, only to the response channel in a blocking manner,
-      so make sure the response channel is consumed.
-      The response channel will be closed after the operation.
+      performed when no `:op` key is present.
    - `:records`: `{:op :records :records [...]}` send a collection of records,
       sending responses to an optional `:response` channel entry which will
       be closed after the operation.
@@ -315,22 +312,26 @@
    - `:partitions-for`: `{:op :partitions-for :topic \"foo\"}`, yield partition
       info for the given topic. If a `:response` key is present, produce the
       response there instead of on the record channel.
-   - `:close`: `{:op :close}`, close the producer.
+   - `:close`: `{:op :close}`, close the producer, all channels are closed
+     if successful.
 
-   The resulting output channel will emit payloads as maps containing a
-   `:type` key where `:type` may be:
+   The out/duplex or response channel emit payloads as maps containing an `:op`
+   key which value is taken from the input operation generating the output and
+   a `:type` key where `:type` may be:
 
-   - `:record-metadata`: The result of a successful send as a map in the form:
+   - `:success`: the operation succeeded, there are no additional result keys.
+   - `:record-metadata`: The result of a successful send with additional keys:
       {:topic     \"topic-name\"
        :partition 0 ;; nil if unknown
        :offset    1234567890
        :timestamp 9876543210}
-   - `:exception`: An exception raised
-   - `:partitions`: The result of a `:partitions-for` operation.
+   - `:exception`: An exception was raised, details are in additional keys.
+   - `:partitions`: The result of a `:partitions-for` operation are under an
+     additional `:partitions` key.
    - `:eof`: The producer is closed.
 
-   A closed input channel has the same effect as a :close operation.
-"
+   A closed input channel has the same effect as a `:close` operation.
+  "
   ([config]
    (producer config nil nil))
   ([config ks]
@@ -346,43 +347,49 @@
          send?   (fn [op] ;; return true if op is sending to kafka
                    (or (nil? op)
                        (#{:record :records :send-from} op)))
-         afn-for (fn afn-for ;; return async fn to use for sending response
-                   ([response] (afn-for nil response))
-                   ([op response]
-                    (if (and response (send? op))
-                      a/>!!
-                      a/put!)))
-         ->resp  (fn ->resp ;; convert record metadata or exception to resp map
-                   ([e] (->resp nil e))
-                   ([rm e]
-                    (cond
-                      (and rm (nil? e)) (assoc rm :type :record-metadata)
-                      (and e (nil? rm)) (ex-response e)
-                      :else (->resp
-                              (IllegalArgumentException.
-                                "record metadata & exception are nil")))))
-         cb-for  (fn [n response] ;; return a callback fn
-                   (let [afn (afn-for response)]
-                     (if response
+         afn-for (fn afn-for [op response-ch]
+                   ;; return async fn to use for sending response
+                   (if response-ch
+                     a/>!! ;; producer blocks until response is consumed
+                     a/put!))
+         ->resp  (fn ->resp [op res e]
+                   ;; convert operation result or exception to response map
+                   (cond
+                      e          (assoc (ex-response e) :op op)
+                      (send? op) (assoc res :op    op
+                                            :type :record-metadata)
+                      :else      {:op op :type :success}))
+         cb-for  (fn [op n response-ch] ;; return a send callback fn
+                   (let [afn (afn-for op response-ch)]
+                     (if response-ch
                        (if (= n 1)
                          (fn [rm e]
-                           (afn response (->resp rm e))
-                           (a/close! response))
+                           (afn response-ch (->resp op rm e))
+                           (a/close! response-ch))
                          (let [counter (atom n)]
                            (fn [rm e]
-                             (afn response (->resp rm e))
+                             (afn response-ch (->resp op rm e))
                              (when (zero? (swap! counter dec))
-                               (a/close! response)))))
-                       (fn [rm e] (afn out (->resp rm e))))))
+                               (a/close! response-ch)))))
+                       (fn [rm e] (afn out (->resp op rm e))))))
          send!   (fn [record cb] ;; send record to kafka with callback
-                   (client/send-cb! driver (dissoc record :op :response) cb))]
+                   (client/send-cb! driver (dissoc record :op :response-ch) cb))
+         respond (fn respond
+                   ([op response-ch response]
+                    (respond op response-ch response nil))
+                   ([op response-ch response e]
+                    ((afn-for op response-ch)
+                     (or response-ch out)
+                     (->resp op response e))))]
 
      (a/thread
        (try
-         (loop [{:keys [op timeout callback response topic records]
+         (loop [{:keys [op timeout callback response-ch topic records]
                  :as   record} (a/<!! in)]
            (if (or (nil? record) (= op :close))
-             (client/close! driver timeout)
+             (do
+               (respond :close response-ch (client/close! driver timeout))
+               (when response-ch (a/close! response-ch)))
              (do
                (try
                  (case op
@@ -393,30 +400,31 @@
                    (callback driver)
 
                    :partitions-for
-                   (when response
-                     (a/put! response
-                             {:type       :partitions
-                              :partitions (client/partitions-for driver
-                                                                 (name topic))}))
+                   (respond op response-ch
+                            {:op         :partitions-for
+                             :type       :partitions
+                             :partitions (client/partitions-for driver
+                                                                (name topic))})
 
                    :records
                    (let [n (count records)
-                         cb (cb-for n response)]
+                         cb (cb-for :records n response-ch)]
                      (doseq [record records]
                        (send! record cb)))
 
                    (nil :record)
-                   (send! record (cb-for 1 response)))
+                   (send! record (cb-for :record 1 response-ch)))
 
                  (catch Exception e
-                   ((afn-for op response) (or response out) (->resp e))))
+                   (respond op response-ch nil e)))
 
                (recur (a/<!! in)))))
          (catch Exception e
-           (a/put! out (->resp e)))
+           (a/put! out (->resp nil nil e)))
          (finally
            (a/put! out eof-response)
-           (a/close! out))))
+           (a/close! out)
+           (a/close! in))))
 
      (if duplex?
        (duplex in out)
