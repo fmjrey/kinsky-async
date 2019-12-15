@@ -309,6 +309,11 @@
       sending responses to an optional `:response` channel entry which will
       be closed after the operation.
    - `:flush`: `{:op :flush}`, flush unsent messages.
+   - `:init-transactions`: prepare the producer for transaction operations using
+      the `transactional.id` from producer config.
+   - `:begin-transaction`: initiate a new transaction.
+   - `:commit-transaction`: terminate current transaction.
+   - `:abort-transaction`: abort current transaction.
    - `:partitions-for`: `{:op :partitions-for :topic \"foo\"}`, yield partition
       info for the given topic. If a `:response` key is present, produce the
       response there instead of on the record channel.
@@ -413,7 +418,16 @@
                        (send! record cb)))
 
                    (nil :record)
-                   (send! record (cb-for :record 1 response-ch)))
+                   (send! record (cb-for :record 1 response-ch))
+
+                   :init-transactions
+                   (respond op response-ch (client/init-transactions! driver))
+                   :begin-transaction
+                   (respond op response-ch (client/begin-transaction! driver))
+                   :commit-transaction
+                   (respond op response-ch (client/commit-transaction! driver))
+                   :abort-transaction
+                   (respond op response-ch (client/abort-transaction! driver)))
 
                  (catch Exception e
                    (respond op response-ch nil e)))
