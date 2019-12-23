@@ -99,55 +99,87 @@
       max-wait ([_] nil)
       ctl      ([v] (or v {:op :close})))))
 
+(def send? #{:record :records :send-from})
+(def close? #{:close :stop})
+
+(defn ->op-response
+  "Convert operation result or exception into a response map."
+  [op result e]
+  (cond
+    e (assoc (ex-response e) :op op)
+    (send? op) (assoc result :op op
+                             :type :record-metadata)
+    :else {:op op :type :result :result result}))
+
+(defn- respond
+  "Send `result` or exception `e` back to application on `out` channel,
+  or when provided on `response-ch` which is then closed.
+  Return `result` or nil if an exception `e` is provided (not nil)."
+  ([op out response-ch result]
+   (respond op out response-ch result nil))
+  ([op out response-ch result e]
+   (a/>!! (or response-ch out) (->op-response op result e))
+   (when response-ch (a/close! response-ch))
+   (when-not e result)))
+
 (defn poller-ctl
   [ctl out driver timeout]
   (if-let [payload (get-within ctl timeout)]
-    (let [op (:op payload)]
-      (case op
-        :callback
-        (let [f (:callback payload)]
-          (or (f driver out)
-              (not (:process-result? payload))))
+    (let [{:keys [op response-ch]} payload
+          op (or op :close)]
+      (if (close? op)
+        (respond op out response-ch (client/close! driver (:timeout payload)))
+        (do
+          (try
+            (case op
+              :callback
+              (let [f (:callback payload)]
+                (or (f driver out)
+                    (not (:process-result? payload)))) ;; TODO: explain
 
-        [:close :stop]
-        false
+              (or
+               (case op
+                 :subscribe
+                 (respond op out response-ch
+                   (client/subscribe! driver
+                                      (or (:topics payload) (:topic payload))
+                                      (channel-listener out)))
 
-        (or
-         (case op
-           :subscribe
-           (client/subscribe! driver
-                              (or (:topics payload) (:topic payload))
-                              (channel-listener out))
+                 :unsubscribe
+                 (respond op out response-ch (client/unsubscribe! driver))
 
-           :unsubscribe
-           (client/unsubscribe! driver)
+                 :seek
+                 (let [{:keys [offset topic-partition topic-partitions]} payload]
+                   (respond op out response-ch
+                     (if (number? offset)
+                       (client/seek! driver topic-partition offset)
+                       (case offset
+                         :beginning (client/seek-beginning! driver topic-partitions)
+                         :end (client/seek-end! driver topic-partitions)))))
 
-           :seek
-           (let [{:keys [offset topic-partition topic-partitions]} payload]
-             (if (number? offset)
-               (client/seek! driver topic-partition offset)
-               (case offset
-                 :beginning (client/seek-beginning! driver topic-partitions)
-                 :end (client/seek-end! driver topic-partitions))))
+                 :commit
+                 (respond op out response-ch
+                          (if-let [topic-offsets (:topic-offsets payload)]
+                            (client/commit! driver topic-offsets)
+                            (client/commit! driver)))
 
-           :commit
-           (if-let [topic-offsets (:topic-offsets payload)]
-             (client/commit! driver topic-offsets)
-             (client/commit! driver))
+                 :pause
+                 (respond op out response-ch
+                          (client/pause! driver (:topic-partitions payload)))
 
-           :pause
-           (client/pause! driver (:topic-partitions payload))
+                 :resume
+                 (respond op out response-ch
+                          (client/resume! driver (:topic-partitions payload)))
 
-           :resume
-           (client/resume! driver (:topic-partitions payload))
-
-           :partitions-for
-           (do
-             (let [parts (client/partitions-for driver (:topic payload))]
-               (a/put! (or (:response-ch payload) out)
-                       {:type       :partitions
-                        :partitions parts}))))
-         true)))
+                 :partitions-for
+                 (respond op out response-ch
+                          {:op         :partitions-for
+                           :type       :partitions
+                           :partitions (client/partitions-for driver
+                                                              (-> payload
+                                                                  :topic
+                                                                  name))}))
+               true))))))
     true))
 
 (defn close-poller
@@ -205,22 +237,29 @@
     [ctl out]))
 
 (defn consumer
-  "Build an async consumer. Yields a vector of record and control
-   channels.
+  "Build an async consumer. Yields a vector of two channels `[out ctl]`,
+   the first conveys records and operation results back to the application,
+   and the second is for the application to send operations.
 
    Arguments config ks and vs work as for kinsky.client/consumer.
    The config map must be a valid consumer configuration map and may contain
    the following additional keys:
 
-   - `:input-buffer`: Maximum backlog of control channel messages.
-   - `:output-buffer`: Maximum queued consumed messages.
-   - `:timeout`: Poll interval
+   - `:input-buffer`: fixed buffer size for `ctl` channel.
+   - `:output-buffer`: fixed buffer size for `out` channel.
+   - `:timeout`: Poll interval in milliseconds
    - `:topic` : Automatically subscribe to this topic before launching loop
-   - `:duplex?`: yields a duplex channel instead of a vector of two chans
+   - `:duplex?`: yields a duplex channel instead of a vector of two channels.
 
    The resulting control channel is used to interact with the consumer driver
-   and expects map payloads, whose operation is determined by their
-   `:op` key. The following commands are handled:
+   and expects map payloads, whose operation is determined by their `:op` key.
+   An optional response channel can be provided under the `:response-ch` key,
+   in which case the operation results are sent to that channel instead of the
+   out/duplex channel.
+   The optional response channel is closed once the operation completes
+   while the out/duplex channel remains open until a `:close` operation.
+
+   The following operations are handled:
 
    - `:subscribe`: `{:op :subscribe :topic \"foo\"}` subscribe to a topic.
    - `:unsubscribe`: `{:op :unsubscribe}`, unsubscribe from all topics.
@@ -236,32 +275,34 @@
       The offset must be a long value to seek on a single topic-partition,
       or keyword `:beginning` or `:end` to seek on a seq of topic-partitions.
    - `:partitions-for`: `{:op :partitions-for :topic \"foo\"}`, yield partition
-      info for the given topic. If a `:response` key is
-      present, produce the response there instead of on
-      the record channel.
-   - `commit`: `{:op :commit}` commit offsets, an optional `:topic-offsets` key
+      info for the given topic. If a `:response` key is present, produce the
+      response there instead of on the output channel.
+   - `:commit`: `{:op :commit}` commit offsets, an optional `:topic-offsets` key
       may be present for specific offset committing.
    - `:pause`: `{:op :pause}` pause consumption.
    - `:resume`: `{:op :resume}` resume consumption.
    - `:callback`: `{:op :callback :callback (fn [d ch])}` Execute a function
       of 2 arguments, the consumer driver and output channel, on a woken up
       driver.
-   - `:close`: `{:op :close}` stop and close consumer.
+   - `:close`: `{:op :close}` stop and close consumer and all channels.
    - `:stop`: `{:op :stop}` same as :close.
 
 
-   The resulting output channel will emit payloads with as maps containing a
-   `:type` key where `:type` may be:
+   The out/duplex or response channel emit payloads as maps containing an `:op`
+   key which value is taken from the input operation generating the output and
+   a `:type` key where `:type` may be:
 
-   - `:record`: A consumed record.
-   - `:exception`: An exception raised
+   - `:success`: the operation succeeded, there are no additional result keys.
+   - `:record`: A consumed record, details are in additional keys.
+   - `:exception`: An exception raised, details are in additional keys.
    - `:rebalance`: A rebalance event.
    - `:eof`: The end of this stream.
-   - `:partitions`: The result of a `:partitions-for` operation.
+   - `:partitions`: The result of a `:partitions-for` operation are under an
+     additional `:partitions` key.
    - `:woken-up`: A notification that the consumer was woken up.
 
    A closed control channel has the same effect as a :close operation.
-"
+  "
   ([config]
    (consumer config nil nil))
   ([config kd vd]
@@ -286,38 +327,31 @@
     :else       (client/producer config)))
 
 (defn producer
-  "Build a producer, reading records to send from a channel.
+  "Build a producer. Yields a vector of two channels `[in out]`, the first
+   is for the application to send records and operations, and the second
+   conveys operation results back to the application.
 
    Arguments mirror those of kinsky.client/producer.
    The config map must be a valid consumer configuration map and may contain
    the following additional keys:
 
-   - `:input-buffer`: Maximum backlog of control channel messages.
-   - `:output-buffer`: Maximum queued consumed messages.
+   - `:input-buffer`: fixed buffer size for `in` channel.
+   - `:output-buffer`: fixed buffer size for `out` channel.
    - `:duplex?`: yields a duplex channel instead of a vector of two chans
 
-   Yields a vector of two values `[in out]`, an input channel where operations
-   to be performed should be sent, and an output channel where operation
-   results are sent.
-
    The input channel is used to send operations to the producer driver
-   and expects map payloads, whose operation is determined by their
-   `:op` key.
+   and expects map payloads, whose operation is determined by their `:op` key.
    An optional response channel can be provided under the `:response-ch` key,
    in which case the operation results are sent to that channel instead of the
-   out/duplex channel. Result are sent to the response channel in a blocking
-   manner, while results sent to the out/duplex channel are sent in a
-   non-blocking manner. Therefore make sure the response channel is consumed.
-   The response channel is closed after the operation completes while the
-   out/duplex channel remains open until a `:close` operation.
+   out/duplex channel.
+   The optional response channel is closed once the operation completes
+   while the out/duplex channel remains open until a `:close` operation.
 
    The following operations are handled:
 
    - `:record`: `{:op :record :topic \"foo\"}` send a record out, also
       performed when no `:op` key is present.
-   - `:records`: `{:op :records :records [...]}` send a collection of records,
-      sending responses to an optional `:response` channel entry which will
-      be closed after the operation.
+   - `:records`: `{:op :records :records [...]}` send a collection of records.
    - `:flush`: `{:op :flush}`, flush unsent messages.
    - `:init-transactions`: prepare the producer for transaction operations using
       the `transactional.id` from producer config.
@@ -325,10 +359,9 @@
    - `:commit-transaction`: terminate current transaction.
    - `:abort-transaction`: abort current transaction.
    - `:partitions-for`: `{:op :partitions-for :topic \"foo\"}`, yield partition
-      info for the given topic. If a `:response` key is present, produce the
-      response there instead of on the record channel.
-   - `:close`: `{:op :close}`, close the producer, all channels are closed
-     if successful.
+      info for the given topic.
+   - `:close`: `{:op :close}`, close the producer and all channels.
+   - `:stop`: `{:op :stop}` same as :close.
 
    The out/duplex or response channel emit payloads as maps containing an `:op`
    key which value is taken from the input operation generating the output and
@@ -359,64 +392,39 @@
          driver  (make-producer opts ks vs)
          in      (a/chan inbuf)
          out     (a/chan outbuf)
-         send?   (fn [op] ;; return true if op is sending to kafka
-                   (or (nil? op)
-                       (#{:record :records :send-from} op)))
-         afn-for (fn afn-for [op response-ch]
-                   ;; return async fn to use for sending response
-                   (if response-ch
-                     a/>!! ;; producer blocks until response is consumed
-                     a/put!))
-         ->resp  (fn ->resp [op res e]
-                   ;; convert operation result or exception to response map
-                   (cond
-                      e          (assoc (ex-response e) :op op)
-                      (send? op) (assoc res :op    op
-                                            :type :record-metadata)
-                      :else      {:op op :type :success}))
          cb-for  (fn [op n response-ch] ;; return a send callback fn
-                   (let [afn (afn-for op response-ch)]
-                     (if response-ch
-                       (if (= n 1)
+                   (if response-ch
+                     (if (= n 1)
+                       (fn [rm e]
+                         (a/>!! response-ch (->op-response op rm e))
+                         (a/close! response-ch))
+                       (let [counter (atom n)]
                          (fn [rm e]
-                           (afn response-ch (->resp op rm e))
-                           (a/close! response-ch))
-                         (let [counter (atom n)]
-                           (fn [rm e]
-                             (afn response-ch (->resp op rm e))
-                             (when (zero? (swap! counter dec))
-                               (a/close! response-ch)))))
-                       (fn [rm e] (afn out (->resp op rm e))))))
+                           (a/>!! response-ch (->op-response op rm e))
+                           (when (zero? (swap! counter dec))
+                             (a/close! response-ch)))))
+                     (fn [rm e] (a/>!! out (->op-response op rm e)))))
          send!   (fn [record cb] ;; send record to kafka with callback
-                   (client/send-cb! driver (dissoc record :op :response-ch) cb))
-         respond (fn respond
-                   ([op response-ch response]
-                    (respond op response-ch response nil))
-                   ([op response-ch response e]
-                    ((afn-for op response-ch)
-                     (or response-ch out)
-                     (->resp op response e))))]
+                   (client/send-cb! driver (dissoc record :op :response-ch) cb))]
 
      (a/thread
        (.setName (Thread/currentThread) (str driver))
        (try
          (loop [{:keys [op timeout callback response-ch topic records]
                  :as   record} (a/<!! in)]
-           (if (or (nil? record) (= op :close))
-             (do
-               (respond :close response-ch (client/close! driver timeout))
-               (when response-ch (a/close! response-ch)))
+           (if (or (nil? record) (close? op))
+             (respond (or op :close) out response-ch (client/close! driver timeout))
              (do
                (try
                  (case op
                    :flush
-                   (client/flush! driver)
+                   (respond op out response-ch (client/flush! driver))
 
                    :callback
                    (callback driver)
 
                    :partitions-for
-                   (respond op response-ch
+                   (respond op out response-ch
                             {:op         :partitions-for
                              :type       :partitions
                              :partitions (client/partitions-for driver
@@ -432,24 +440,25 @@
                    (send! record (cb-for :record 1 response-ch))
 
                    :init-transactions
-                   (respond op response-ch (client/init-transactions! driver))
+                   (respond op out response-ch (client/init-transactions! driver))
                    :begin-transaction
-                   (respond op response-ch (client/begin-transaction! driver))
+                   (respond op out  response-ch (client/begin-transaction! driver))
                    :commit-transaction
-                   (respond op response-ch (client/commit-transaction! driver))
+                   (respond op out response-ch (client/commit-transaction! driver))
                    :abort-transaction
-                   (respond op response-ch (client/abort-transaction! driver)))
+                   (respond op out response-ch (client/abort-transaction! driver)))
 
                  (catch Exception e
                    (respond op response-ch nil e)))
 
                (recur (a/<!! in)))))
          (catch Exception e
-           (a/put! out (->resp nil nil e)))
+           (a/put! out (->op-response nil nil e)))
          (finally
            (a/put! out eof-response)
            (a/close! out)
-           (a/close! in))))
+           (a/close! in)
+           (client/close! driver))))
 
      (if duplex?
        (duplex in out)
