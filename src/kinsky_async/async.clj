@@ -177,13 +177,13 @@
     (a/tap mult c2)
     (a/pipe recs out)
     (a/thread
-      (.setName (Thread/currentThread) "kafka-control-poller")
+      (.setName (Thread/currentThread) (str driver "-control-poller"))
       (loop []
         (when-let [cr (a/<!! c2)]
           (client/wake-up! driver)
           (recur))))
     (a/thread
-      (.setName (Thread/currentThread) "kafka-consumer-poller")
+      (.setName (Thread/currentThread) (str driver "-poller"))
       (try
         (loop []
           (when (safe-poll c1 recs out driver timeout)
@@ -388,6 +388,7 @@
                      (->resp op response e))))]
 
      (a/thread
+       (.setName (Thread/currentThread) (str driver))
        (try
          (loop [{:keys [op timeout callback response-ch topic records]
                  :as   record} (a/<!! in)]
