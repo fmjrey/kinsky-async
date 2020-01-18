@@ -1,77 +1,42 @@
 Kinsky: Clojure Kafka client library
 ====================================
 
-[![Build Status](https://secure.travis-ci.org/pyr/kinsky.svg)](http://travis-ci.org/pyr/kinsky)
+[![Build Status](https://secure.travis-ci.org/fmjrey/kinsky-async.svg)](http://travis-ci.org/fmjrey/kinsky-async)
 
-Kinsky is a *somewhat* opinionated client library
-for [Apache Kafka](http://kafka.apache.org) in Clojure.
+Kinsky is a clojure client library for [Apache Kafka](http://kafka.apache.org)
+based on `core.async` and [kinsky](https://github.com/pyr/kinsky).
+Abstracting Kafka behind `core.async` channels makes it possible to implement
+business logic with `core.async` channels and make kafka dependency a config
+option. More precisely an application could be configured to only use channels
+and not kafka to enable a faster development workflow, faster tests,
+including end-to-end logical testing without the added complexity of kafka,
+the latter can be dealt with during integration testing.
 
-Kinsky provides the following:
+The original code of this library was initially part of
+[kinsky](https://github.com/pyr/kinsky). It has been extracted into this
+separate library when the original `kinsky` authors decided to deprecate
+their `core.async` facade which they did not use in production.
 
-- Kakfa 0.10.0.x compatibility
-- Adequate data representation of Kafka types.
-- Default serializer and deserializer implementations such as
-  **JSON**, **EDN** and a **keyword** serializer for keys.
-- A `core.async` facade for producers and consumers.
-- Documentation
+This library has been used in prototyping activities, but it's not yet been
+battled tested in a production environment. 
 
 ## Usage
 
 ```clojure
-   [[spootnik/kinsky "0.1.23"]]
+   [[fmjrey/kinsky-async "0.1.0"]]
 ```
 
 ## Documentation
 
-* [API Documentation](http://pyr.github.io/kinsky)
+* [API Documentation](http://fmjrey.github.io/kinsky-async)
 
-## Contributors
-
-Thanks a lot to these awesome contributors
-
-- Ray Cheung (@raycheung)
-- Daniel Truemper (@truemped)
-- Mathieu Marchandise (@vielmath)
-- Eli Sorey (@esorey)
-- François Rey (@fmjrey)
-- Karthikeyan Chinnakonda (@codingkarthik)
-- Jean-Baptiste Besselat (@luhhujbb)
-- Carl Düvel (@hackbert)
-- Andrew Garman (@agarman)
-- Pyry Kovanen (@pkova)
-- Henrik Lundahl (@henriklundahl)
-- Josh Glover (@jmglov)
-- Marcus Spiegel (@malesch)
-- Jeff Stokes (@jstokes)
-- Martino (@vise890-ovo)
-- Ikuru K (@iku000888)
 
 ## Changelog
 
-### 0.1.24
+### 0.1.0
 
-- Add support for producer transaction
-
-### 0.1.23
-
-- Fixed ConcurrentModificationException when async consumer created with topic
-- Added support for reader opts when consuming
-- Add timestamp in record output
-
-### 0.1.22
-
-- Update to latest Kafka clients
-- Typo fix
-
-### 0.1.21
-
-- Update to latest Kafka clients
-- Provide duplex channels to bridge control and record channels in consumers
-
-### 0.1.16
-
-- Stability and bugfix release
-- Lots of input from @jmgrov, @scott-abernethy, and @henriklundahl. Thanks!
+Continuing from [kinsky 0.1.24](https://github.com/pyr/kinsky)
+- Minor typo and code refactoring
 
 ## Examples
 
@@ -79,21 +44,11 @@ The examples assume the following require forms:
 
 ```clojure
 (:require [kinsky.client      :as client]
-          [kinsky.async       :as async]
+          [kinsky-async.async :as async]
           [clojure.core.async :as a :refer [go <! >!]])
 ```
 
 ### Production
-
-```clojure
-(let [p (client/producer {:bootstrap.servers "localhost:9092"}
-                         (client/keyword-serializer)
-                         (client/edn-serializer))]
-  (client/send! p "account" :account-a {:action :login}))
-
-```
-
-Async facade:
 
 ```clojure
 (let [ch (async/producer {:bootstrap.servers "localhost:9092"} :keyword :edn)]
@@ -103,18 +58,6 @@ Async facade:
 ```
 
 ### Consumption
-
-```clojure
-(let [c (client/consumer {:bootstrap.servers "localhost:9092"
-                          :group.id          "mygroup"}
-                         (client/keyword-deserializer)
-                         (client/edn-deserializer))]
-  (client/subscribe! c "account")
-  (client/poll! c 100))
-
-```
-
-Async facade:
 
 ```clojure
 (let [ch     (async/consumer {:bootstrap.servers "localhost:9092"
