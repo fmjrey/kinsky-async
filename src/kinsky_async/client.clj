@@ -1,4 +1,4 @@
-(ns kinsky.client
+(ns kinsky-async.client
   "Small clojure shim on top of the Kafka client API
    See https://github.com/pyr/kinsky for example usage."
   (:require [clojure.edn           :as edn]

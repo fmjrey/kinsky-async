@@ -1,6 +1,6 @@
-(ns kinsky.async
-  "Clojure core.async support in kinsky.
-   See https://github.com/pyr/kinsky for example usage."
+(ns kinsky-async.async
+  "Clojure core.async support on top of kinsky.
+   See https://github.com/fmjrey/kinsky-async for example usage."
   (:require [clojure.core.async :as a]
             [clojure.core.async.impl.protocols :as impl]
             [kinsky.client      :as client])

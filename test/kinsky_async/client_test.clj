@@ -1,5 +1,5 @@
-(ns kinsky.client-test
-  (:require [clojure.test  :refer :all :as t]
+(ns kinsky-async.client-test
+  (:require [clojure.test :refer :all :as t]
             [clojure.pprint :as pp]
             [kinsky.client :as client]
             [kinsky.embedded :as e]))

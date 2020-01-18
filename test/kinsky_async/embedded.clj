@@ -1,4 +1,4 @@
-(ns kinsky.embedded
+(ns kinsky-async.embedded
   "Based on crux.kafka.embedded"
   (:require [clojure.java.io :as io]
             [clojure.spec.alpha :as s])

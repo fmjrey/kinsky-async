@@ -1,4 +1,4 @@
-(ns kinsky.admin
+(ns kinsky-async.admin
   "Wrapper around Kafka's `AdminClient`"
   (:require [kinsky.client :refer (GenericDriver opts->props)]
             [clojure.core.async :as a])
