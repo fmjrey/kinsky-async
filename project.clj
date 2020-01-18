@@ -1,18 +1,18 @@
-(defproject spootnik/kinsky "0.1.25-SNAPSHOT"
-  :description "Kafka clojure client library"
+(defproject fmjrey/kinsky-async "0.1.0-SNAPSHOT"
+  :description "Kafka clojure client based on core.async and kinsky"
   :plugins [[lein-codox "0.9.1"]
             [lein-ancient "0.6.15"]]
-  :url "https://github.com/pyr/kinsky"
+  :url "https://github.com/fmjrey/kinsky-async"
   :license {:name "MIT License"
-            :url  "https://github.com/pyr/kinsky/tree/master/LICENSE"}
-  :codox {:source-uri "https://github.com/pyr/kinsky/blob/{version}/{filepath}#L{line}"
+            :url  "https://github.com/fmjrey/kinsky-async/tree/master/LICENSE"}
+  :codox {:source-uri "https://github.com/fmjrey/kinsky-async/blob/{version}/{filepath}#L{line}"
           :metadata   {:doc/format :markdown}}
   :global-vars {*warn-on-reflection* true}
   :deploy-repositories [["snapshots" :clojars] ["releases" :clojars]]
   :dependencies [[org.clojure/clojure            "1.10.0"]
                  [org.clojure/core.async         "0.4.490"]
                  [org.apache.kafka/kafka-clients "2.3.0"]
-                 [cheshire                       "5.8.1"]]
+                 [spootnik/kinsky "0.1.25-SNAPSHOT"]]
   :test-selectors {:default     (complement :integration)
                    :integration :integration
                    :all         (constantly true)}
