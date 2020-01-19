@@ -1,5 +1,5 @@
-Kinsky: Clojure Kafka client library
-====================================
+Kinsky Async: Clojure Kafka client library based on core.async
+==============================================================
 
 [![Build Status](https://secure.travis-ci.org/fmjrey/kinsky-async.svg)](http://travis-ci.org/fmjrey/kinsky-async)
 
@@ -22,14 +22,8 @@ battled tested in a production environment.
 
 ## Usage
 
-```clojure
-   [[fmjrey/kinsky-async "0.1.0"]]
-```
-
-## Documentation
-
-* [API Documentation](http://fmjrey.github.io/kinsky-async)
-
+This library is not yet on clojars, until then one needs to clone locally
+and use `lein install` or use `deps.edn` to point to a github commit.
 
 ## Changelog
 
